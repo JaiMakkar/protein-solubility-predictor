@@ -67,7 +67,7 @@ streamlit run app.py
 
 ## 🌐 Deployment
 The app is deployed on **Streamlit Community Cloud**:  
-👉 [Live Demo](https://protein-solubility-predictor.streamlit.app) *(replace with your link once deployed)*
+👉 https://protein-solubility-predictor.streamlit.app
 
 ---
 
