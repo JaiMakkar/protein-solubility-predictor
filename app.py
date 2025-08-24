@@ -1,5 +1,5 @@
 # ============================================
-# Protein Solubility Predictor (Enhanced UI)
+# Protein Solubility Predictor (Optimized with Caching)
 # ============================================
 
 import streamlit as st
@@ -9,7 +9,7 @@ from collections import Counter
 from sklearn.model_selection import train_test_split, GridSearchCV
 from sklearn.preprocessing import StandardScaler
 from imblearn.over_sampling import SMOTE
-from sklearn.metrics import classification_report, roc_auc_score, accuracy_score, roc_curve
+from sklearn.metrics import roc_auc_score, accuracy_score, roc_curve
 from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier
 from sklearn.linear_model import LogisticRegression
 from sklearn.svm import SVC
@@ -44,22 +44,13 @@ st.write("Upload your dataset, train models, and predict solubility with the bes
 tab1, tab2, tab3 = st.tabs(["📂 Data", "⚡ Training", "🔮 Prediction"])
 
 # -------------------------
-# Tab 1: Data Upload
+# Cached Functions
 # -------------------------
-with tab1:
-    st.subheader("📂 Upload Training Dataset")
-    uploaded_file = st.file_uploader("Upload CSV (must include 'Solubility')", type=["csv"])
-    if uploaded_file is None:
-        st.warning("⚠️ Please upload a dataset to continue.")
-        st.stop()
-
+@st.cache_data
+def load_and_preprocess(uploaded_file):
     df = pd.read_csv(uploaded_file)
-    st.success("✅ Dataset uploaded successfully!")
-    st.write("### Preview of Dataset")
-    st.dataframe(df.head(20))
-
-    # Preprocess
     df.fillna(df.mean(numeric_only=True), inplace=True)
+
     X = df.drop(columns=["Solubility"])
     y = df["Solubility"]
 
@@ -74,34 +65,19 @@ with tab1:
     smote = SMOTE(random_state=42)
     X_train_res, y_train_res = smote.fit_resample(X_train_scaled, y_train)
 
-    st.write("✅ NaNs filled, data scaled, and SMOTE applied")
-    st.write("Class distribution after SMOTE:", dict(Counter(y_train_res)))
+    return df, X_train_res, X_test_scaled, y_train_res, y_test, scaler
 
-# -------------------------
-# Tab 2: Training
-# -------------------------
-with tab2:
-    st.subheader("⚡ Model Training with GridSearchCV")
 
+@st.cache_resource
+def train_models(X_train_res, y_train_res, X_test_scaled, y_test):
     param_grids = {
         "RandomForest": {
             "model": RandomForestClassifier(random_state=42),
-            "params": {
-                "n_estimators": [100, 300],
-                "max_depth": [None, 5, 10],
-                "min_samples_split": [2, 5],
-                "min_samples_leaf": [1, 2]
-            }
+            "params": {"n_estimators": [100], "max_depth": [5, None]}
         },
         "XGBoost": {
-            "model": XGBClassifier(use_label_encoder=False, eval_metric="logloss", random_state=42),
-            "params": {
-                "n_estimators": [100, 300],
-                "max_depth": [3, 5],
-                "learning_rate": [0.01, 0.1],
-                "subsample": [0.8, 1.0],
-                "colsample_bytree": [0.8, 1.0]
-            }
+            "model": XGBClassifier(eval_metric="logloss", random_state=42),
+            "params": {"n_estimators": [100], "max_depth": [3]}
         },
         "LogisticRegression": {
             "model": LogisticRegression(max_iter=5000, random_state=42),
@@ -121,8 +97,7 @@ with tab2:
         }
     }
 
-    best_model, best_score, results = None, 0, {}
-    progress = st.progress(0)
+    best_model, best_score, best_acc, results = None, 0, 0, {}
     total_models, done = len(param_grids), 0
 
     for name, mp in param_grids.items():
@@ -136,16 +111,46 @@ with tab2:
 
         results[name] = {"best_params": grid.best_params_, "accuracy": acc, "roc_auc": auc}
         if auc > best_score:
-            best_score, best_model = auc, grid.best_estimator_
+            best_score, best_model, best_acc = auc, grid.best_estimator_, acc
 
-        done += 1
-        progress.progress(done / total_models)
+    return best_model, best_score, best_acc, results
+
+
+# -------------------------
+# Tab 1: Data Upload
+# -------------------------
+with tab1:
+    st.subheader("📂 Upload Training Dataset")
+    uploaded_file = st.file_uploader("Upload CSV (must include 'Solubility')", type=["csv"])
+    if uploaded_file is None:
+        st.warning("⚠️ Please upload a dataset to continue.")
+        st.stop()
+
+    df, X_train_res, X_test_scaled, y_train_res, y_test, scaler = load_and_preprocess(uploaded_file)
+
+    st.success("✅ Dataset uploaded and preprocessed successfully!")
+    st.write("### Preview of Dataset")
+    st.dataframe(df.head(20))
+    st.write("✅ NaNs filled, data scaled, and SMOTE applied")
+    st.write("Class distribution after SMOTE:", dict(Counter(y_train_res)))
+
+
+# -------------------------
+# Tab 2: Training
+# -------------------------
+with tab2:
+    st.subheader("⚡ Model Training")
+
+    with st.spinner("Training models... Please wait."):
+        best_model, best_score, best_acc, results = train_models(
+            X_train_res, y_train_res, X_test_scaled, y_test
+        )
 
     st.success(f"🏆 Best Model: **{best_model.__class__.__name__}** with ROC-AUC: {best_score:.4f}")
 
-    # Metrics Display
+    # Metrics
     col1, col2 = st.columns(2)
-    col1.metric("Best Accuracy", f"{results[list(results.keys())[0]]['accuracy']:.2f}")
+    col1.metric("Best Accuracy", f"{best_acc:.2f}")
     col2.metric("Best ROC-AUC", f"{best_score:.2f}")
 
     # Results Table
@@ -160,6 +165,7 @@ with tab2:
                   labels=dict(x="False Positive Rate", y="True Positive Rate"),
                   width=500, height=400)
     st.plotly_chart(fig)
+
 
 # -------------------------
 # Tab 3: Prediction
@@ -195,15 +201,19 @@ with tab3:
     batch_file = st.file_uploader("Upload CSV without 'Solubility' column", type=["csv"], key="batch")
     if batch_file is not None:
         new_data = pd.read_csv(batch_file, encoding="latin1")
+        new_data.fillna(new_data.mean(numeric_only=True), inplace=True)
         st.write("### Uploaded Data Preview")
         st.dataframe(new_data.head())
         try:
             new_data_scaled = scaler.transform(new_data)
             batch_preds = best_model.predict(new_data_scaled)
+
             results_df = new_data.copy()
             results_df["Predicted_Solubility"] = ["Soluble" if p == 1 else "Insoluble" for p in batch_preds]
+
             st.write("### Prediction Results")
             st.dataframe(results_df.head(20))
+
             csv = results_df.to_csv(index=False).encode("utf-8")
             st.download_button("⬇️ Download Predictions as CSV", csv, "batch_predictions.csv", "text/csv")
         except Exception as e:
